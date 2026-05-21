@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# wrap-claude — restart Claude Code inside a bubblewrap sandbox with
+# --dangerously-skip-permissions, so chained commands (cd, quotes, pipes)
+# stop tripping the permission prompt.
+#
+# Usage:
+#   cd /path/to/project
+#   wrap-claude "your goal here"        # initial prompt as one arg
+#   wrap-claude                         # no goal, interactive
+#   wrap-claude --resume                # passes through to claude
+#
+# Trust model:
+#   - RW host access is limited to $PWD and ~/.claude (session history).
+#   - Everything else in $HOME is invisible (no .ssh, .aws, .env files).
+#   - /usr is RO; /etc is RO; /tmp is fresh tmpfs.
+#   - Network is shared (Claude needs api.anthropic.com).
+#   - --die-with-parent: sandbox dies when this script exits.
+#
+# Worst-case blast radius: the LLM nukes $PWD and your Claude session log.
+# Nothing else on the host is reachable for writes.
+
+set -euo pipefail
+
+if ! command -v bwrap >/dev/null; then
+  echo "wrap-claude: bwrap not installed (sudo apt install bubblewrap)" >&2
+  exit 1
+fi
+
+CLAUDE_BIN="$(command -v claude || true)"
+[[ -z "$CLAUDE_BIN" ]] && { echo "wrap-claude: claude not in PATH" >&2; exit 1; }
+
+PROJECT_DIR="$(pwd)"
+UID_NUM="$(id -u)"
+RUN_DIR="/run/user/$UID_NUM"
+
+args=(
+  # System tree, read-only.
+  --ro-bind /usr /usr
+  --ro-bind /etc /etc
+  --symlink usr/bin   /bin
+  --symlink usr/sbin  /sbin
+  --symlink usr/lib   /lib
+  --symlink usr/lib64 /lib64
+
+  --proc /proc
+  --dev  /dev
+  --tmpfs /tmp
+  --tmpfs /var
+  --tmpfs /run
+  --dir  "$RUN_DIR"
+  --setenv XDG_RUNTIME_DIR "$RUN_DIR"
+
+  # The project: the only host data the LLM can write.
+  --bind  "$PROJECT_DIR" "$PROJECT_DIR"
+  --chdir "$PROJECT_DIR"
+
+  # Fresh HOME on tmpfs, then selectively expose what claude needs.
+  --tmpfs "$HOME"
+  --setenv HOME "$HOME"
+
+  # Claude session/config (RW: claude writes telemetry, history, todos here).
+  --bind-try "$HOME/.claude"        "$HOME/.claude"
+  --bind-try "$HOME/.config/claude" "$HOME/.config/claude"
+
+  # The claude binary lives under ~/.local — bind it RO so the wrapper works.
+  --ro-bind-try "$HOME/.local/bin"          "$HOME/.local/bin"
+  --ro-bind-try "$HOME/.local/share/claude" "$HOME/.local/share/claude"
+
+  # Read-only dotfiles claude/git commonly need. Add more if you hit ENOENT.
+  --ro-bind-try "$HOME/.gitconfig" "$HOME/.gitconfig"
+  --ro-bind-try "$HOME/.npmrc"     "$HOME/.npmrc"
+
+  # Namespaces + hardening.
+  --unshare-pid
+  --unshare-ipc
+  --unshare-uts
+  --share-net
+  --hostname claude-sandbox
+  --die-with-parent
+
+  # Visual cue you're inside the sandbox (if you drop to a shell).
+  --setenv PS1 '\[\e[33m\][bwrap]\[\e[0m\] \w \$ '
+  --setenv TERM "${TERM:-xterm-256color}"
+)
+
+# WRAP_CLAUDE_NO_NET=1 cuts network entirely.
+if [[ "${WRAP_CLAUDE_NO_NET:-0}" = "1" ]]; then
+  for i in "${!args[@]}"; do
+    [[ "${args[$i]}" = "--share-net" ]] && args[$i]="--unshare-net"
+  done
+fi
+
+# WRAP_CLAUDE_SSH=1 lets the sandbox use your SSH keys (for git push, etc.).
+if [[ "${WRAP_CLAUDE_SSH:-0}" = "1" ]]; then
+  args+=(--ro-bind-try "$HOME/.ssh" "$HOME/.ssh")
+fi
+
+net=$([[ "${WRAP_CLAUDE_NO_NET:-0}" = 1 ]] && echo off || echo on)
+ssh=$([[ "${WRAP_CLAUDE_SSH:-0}"   = 1 ]] && echo on  || echo off)
+echo "wrap-claude: project=$PROJECT_DIR  net=$net  ssh=$ssh  perms=skip" >&2
+
+exec bwrap "${args[@]}" \
+  "$CLAUDE_BIN" --dangerously-skip-permissions "$@"
