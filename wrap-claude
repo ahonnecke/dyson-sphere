@@ -47,20 +47,31 @@ args=(
   --tmpfs /tmp
   --tmpfs /var
   --tmpfs /run
+  # /run is tmpfs'd, which hides /run/systemd/resolve — but /etc/resolv.conf is a
+  # symlink into there, so it dangles and DNS dies (api.anthropic.com -> ECONNREFUSED).
+  # Restore the resolver dir so resolution works (the 127.0.0.53 stub is reachable
+  # via --share-net).
+  --ro-bind-try /run/systemd/resolve /run/systemd/resolve
   --dir  "$RUN_DIR"
   --setenv XDG_RUNTIME_DIR "$RUN_DIR"
+
+  # Fresh HOME on tmpfs first, then overlay specific paths. Order matters in
+  # bwrap: later args override earlier ones, so the project bind has to come
+  # AFTER the tmpfs HOME (otherwise the tmpfs wipes the bind when PROJECT_DIR
+  # lives under $HOME, which is the common case).
+  --tmpfs "$HOME"
+  --setenv HOME "$HOME"
 
   # The project: the only host data the LLM can write.
   --bind  "$PROJECT_DIR" "$PROJECT_DIR"
   --chdir "$PROJECT_DIR"
 
-  # Fresh HOME on tmpfs, then selectively expose what claude needs.
-  --tmpfs "$HOME"
-  --setenv HOME "$HOME"
-
   # Claude session/config (RW: claude writes telemetry, history, todos here).
   --bind-try "$HOME/.claude"        "$HOME/.claude"
   --bind-try "$HOME/.config/claude" "$HOME/.config/claude"
+  # Claude Code v2's primary config + auth token live in ~/.claude.json (a FILE,
+  # not inside ~/.claude/). Without it the sandbox has no auth/onboarding state.
+  --bind-try "$HOME/.claude.json"   "$HOME/.claude.json"
 
   # The claude binary lives under ~/.local — bind it RO so the wrapper works.
   --ro-bind-try "$HOME/.local/bin"          "$HOME/.local/bin"
@@ -95,9 +106,29 @@ if [[ "${WRAP_CLAUDE_SSH:-0}" = "1" ]]; then
   args+=(--ro-bind-try "$HOME/.ssh" "$HOME/.ssh")
 fi
 
+# WRAP_CLAUDE_AWS=1 binds ~/.aws RO so the AWS CLI (and tools wrapping it via
+# Makefile targets) can read SSO config and cached session tokens. RO means
+# the sandboxed LLM can't tamper with config or refresh tokens — re-auth from
+# outside the sandbox with `aws sso login` when tokens expire.
+if [[ "${WRAP_CLAUDE_AWS:-0}" = "1" ]]; then
+  args+=(--ro-bind-try "$HOME/.aws" "$HOME/.aws")
+fi
+
+# WRAP_CLAUDE_EXTRA_RO is a colon-separated list of paths to bind RO into the
+# sandbox. Use for cross-repo cradles (e.g. ~/src/llm-patterns, ~/src/runlog)
+# that project-level CLAUDE.md instructs the LLM to read.
+if [[ -n "${WRAP_CLAUDE_EXTRA_RO:-}" ]]; then
+  IFS=':' read -ra _extra_ro <<< "$WRAP_CLAUDE_EXTRA_RO"
+  for _p in "${_extra_ro[@]}"; do
+    [[ -n "$_p" ]] && args+=(--ro-bind-try "$_p" "$_p")
+  done
+fi
+
 net=$([[ "${WRAP_CLAUDE_NO_NET:-0}" = 1 ]] && echo off || echo on)
 ssh=$([[ "${WRAP_CLAUDE_SSH:-0}"   = 1 ]] && echo on  || echo off)
-echo "wrap-claude: project=$PROJECT_DIR  net=$net  ssh=$ssh  perms=skip" >&2
+aws=$([[ "${WRAP_CLAUDE_AWS:-0}"   = 1 ]] && echo on  || echo off)
+extra=$([[ -n "${WRAP_CLAUDE_EXTRA_RO:-}" ]] && echo "${WRAP_CLAUDE_EXTRA_RO}" || echo none)
+echo "wrap-claude: project=$PROJECT_DIR  net=$net  ssh=$ssh  aws=$aws  extra_ro=$extra  perms=skip" >&2
 
 exec bwrap "${args[@]}" \
   "$CLAUDE_BIN" --dangerously-skip-permissions "$@"

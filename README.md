@@ -54,10 +54,12 @@ wrap-claude -p "one-shot prompt"
 
 ## Environment knobs
 
-| Var                   | Effect                                                   |
-| --------------------- | -------------------------------------------------------- |
-| `WRAP_CLAUDE_NO_NET=1`| Cut network entirely (only useful with a local model).   |
-| `WRAP_CLAUDE_SSH=1`   | Bind `~/.ssh` RO so the sandbox can `git push` etc.      |
+| Var                      | Effect                                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `WRAP_CLAUDE_NO_NET=1`   | Cut network entirely (only useful with a local model).                                                |
+| `WRAP_CLAUDE_SSH=1`      | Bind `~/.ssh` RO so the sandbox can `git push` etc.                                                   |
+| `WRAP_CLAUDE_AWS=1`      | Bind `~/.aws` RO so the AWS CLI (and Makefile wrappers around it) can read SSO config + cached tokens. RO means tokens can't be refreshed from inside; re-auth outside with `aws sso login` when they expire. |
+| `WRAP_CLAUDE_EXTRA_RO`   | Colon-separated list of paths to bind RO. Use for cross-repo cradles the project's CLAUDE.md tells the LLM to read (e.g. `$HOME/src/llm-patterns:$HOME/src/runlog`). |
 
 ## Things this does NOT do
 
@@ -86,3 +88,30 @@ wrap-claude -p "one-shot prompt"
 
 `bwrap` is what Flatpak uses to sandbox every desktop app on millions of
 machines. It's the right primitive for this.
+
+## Composition with claude-tracker (`ct`)
+
+[`claude-tracker`](../claude-tracker) (`ct`) is a thin wrapper that refuses to
+launch `claude` unless the current cwd is a registered project. It can sandbox
+per-project via several backends; `wrap-claude` is the `bwrap` backend. As of
+the native-sandbox change, `ct`'s default backend is `native` (Claude Code's
+own built-in bash sandbox), so you must select `bwrap` explicitly to launch via
+`wrap-claude`:
+
+```sh
+cd /path/to/risky-project
+ct register risky-project --sandbox --sandbox-backend bwrap
+ct                              # launches inside dyson-sphere (wrap-claude)
+
+# switch an existing project to this backend:
+ct sandbox on --sandbox-backend bwrap
+ct sandbox off
+```
+
+Roles:
+
+- `ct` is the user-facing entrypoint. It owns project identity, the launch DB,
+  and the choice to sandbox.
+- `wrap-claude` is the isolation layer. It knows nothing about projects.
+
+A sibling symlink lives at `./related/claude-tracker` for discovery.
