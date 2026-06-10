@@ -1,5 +1,18 @@
 # dyson-sphere
 
+> **RETIRED (2026-06-10).** `wrap-claude` hand-rolled the same bubblewrap
+> sandbox that Claude Code now ships natively (`sandbox.enabled` in
+> `.claude/settings.json`), and was weaker than the `dev-cradle` container for
+> genuinely untrusted code — it occupied a middle tier neither end needs. The
+> launch flow (`ct`) no longer calls it; the `bwrap` backend is gone.
+>
+> Use instead: **trusted work** → plain `claude`/`ct` (no sandbox, verbs work);
+> **untrusted work** → `ct cradle` (egress-locked container + review gate). A
+> lighter bash-only sandbox is Claude Code's native `sandbox` setting.
+>
+> The code below is kept for reference. `install.sh` refuses to run without
+> `DYSON_SPHERE_FORCE_INSTALL=1`.
+
 A bubblewrap-based sandbox for Claude Code (and similar LLM CLIs) so you can
 hand the model `--dangerously-skip-permissions` without handing it the rest of
 your machine.
